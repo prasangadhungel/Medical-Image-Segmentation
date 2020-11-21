@@ -91,6 +91,7 @@ def get_train_loader(data_folder="COVID-19-20_v2", batch_size=2, train_fraction=
     val_loader = DataLoader(
         val_ds,
         batch_size=1,  # image-level batch to the sliding window method, not the window-level batch
+        pin_memory=torch.cuda.is_available(),
     )
 
     return train_loader, val_loader
