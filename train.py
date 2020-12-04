@@ -1,10 +1,13 @@
 import logging
 import sys
 import os
-from models import UNet_regressor, DiceCELoss
+from models import UNet_regressor, DeepLabV3_3D
+from losses import DiceCELoss
 from dataloader import get_train_loader
 import torch
 import monai
+from torch.utils.tensorboard import SummaryWriter
+from monai.visualize import plot_2d_or_3d_image
 from monai.transforms import AsDiscrete
 from monai.inferers import sliding_window_inference
 from monai.metrics import compute_meandice
@@ -14,22 +17,33 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if __name__ == "__main__":
-    selfnet = UNet_regressor(
-            dimensions=3,
-            in_channels=1,
-            out_channels=2,
-            features=(32, 32, 64, 128, 256, 32),
-            dropout=0.1,
-        ).to(device)
-    ckpt = os.path.join("checkpoints", "net.pt")
-    selfnet.load_state_dict(torch.load(ckpt, map_location=device)['model_state_dict'])
+    net = DeepLabV3_3D(num_classes=2,input_channels=1).to(device)
+    checkpoint = torch.load(os.path.join("checkpoints", "Latest.pt"))
+    net.load_state_dict(checkpoint['model_state_dict'])
+    max_epochs, lr, momentum = 500, 1e-4, 0.95
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    opt.load_state_dict(checkpoint['optimizer_state_dict'])
+    # curr_epoch = 0
+    curr_epoch = checkpoint['epoch']
+    print(curr_epoch)
+    val_interval = 2
+    epoch_num = 500
+    loss_function = DiceCELoss()
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    best_metric = -1
+    best_metric_epoch = -1
+    epoch_loss_values = list()
+    metric_values = list()
+    post_pred = AsDiscrete(argmax=True, to_onehot=True, n_classes=2)
+    post_label = AsDiscrete(to_onehot=True, n_classes=2)
+    writer = SummaryWriter("DeeplabTB")
 
     train_loader, val_loader = get_train_loader()
-    epoch_num = 100
+    n_train = len(train_loader)
     lr = 1e-4
     val_interval = 2
     loss_function = DiceCELoss()
-    opt = torch.optim.Adam(selfnet.parameters(), lr=lr)
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
     best_metric = -1
     best_metric_epoch = -1
     epoch_loss_values = list()
@@ -37,26 +51,40 @@ if __name__ == "__main__":
     post_pred = AsDiscrete(argmax=True, to_onehot=True, n_classes=2)
     post_label = AsDiscrete(to_onehot=True, n_classes=2)
 
-    for epoch in range(epoch_num):
+    for epoch in range(curr_epoch + 1, epoch_num):
         batch_num = 0
-        selfnet.train()
+        net.train()
         step = 0
         for batch_data in train_loader:
-            batch_num += 1
             inputs, labels = (
                 batch_data["image"].to(device),
                 batch_data["label"].to(device),
             )
             opt.zero_grad()
-            outputs, reg = selfnet(inputs)
-            loss = loss_function(outputs, reg, labels)
+            outputs = net(inputs)
+            loss = loss_function(outputs, labels)
             batch_num += 1
             print("loss = {:.8f}, epoch = {}, batch = {}".format(loss.item(), epoch, batch_num))
+            writer.add_scalar("train_loss", loss.item(), n_train * epoch + batch_num)
             loss.backward()
             opt.step()
 
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': net.state_dict(),
+            'optimizer_state_dict': opt.state_dict(),
+        }, os.path.join("DLcheckpoints", "Latest.pt"))
+
+        if epoch + 1 == 120:
+            for param_group in opt.param_groups:
+                param_group['lr'] = 5e-5
+
+        if epoch + 1 == 220:
+            for param_group in opt.param_groups:
+                param_group['lr'] = 1e-5
+
         if (epoch + 1) % val_interval == 0:
-            selfnet.eval()
+            net.eval()
             with torch.no_grad():
                 metric_sum = 0.0
                 metric_count = 0
@@ -65,12 +93,12 @@ if __name__ == "__main__":
                         val_data["image"].to(device),
                         val_data["label"].to(device),
                     )
-                    roi_size = (192, 192, 16)
+                    roi_size = (192, 192, 24)
                     sw_batch_size, overlap = 2, 0.5
                     val_outputs = sliding_window_inference(inputs=val_inputs,
                                                            roi_size=roi_size,
                                                            sw_batch_size=sw_batch_size,
-                                                           predictor=selfnet,
+                                                           predictor=net,
                                                            overlap=overlap,
                                                            mode="gaussian",
                                                            padding_mode="replicate",
@@ -89,13 +117,13 @@ if __name__ == "__main__":
                 if metric > best_metric:
                     best_metric = metric
                     best_metric_epoch = epoch + 1
-                    torch.save({
-                            'epoch': epoch,
-                            'model_state_dict': selfnet.state_dict(),
-                            'optimizer_state_dict': opt.state_dict(),
-                        }, os.path.join("checkpoints", "net.pt"))
+                    torch.save(net.state_dict(), os.path.join("DLcheckpoints", "deeplab" + str(metric) + ".pt"))
                     print("saved new best metric model")
                 print(
                     f"current epoch: {epoch + 1} current mean dice: {metric:.4f}"
                     f"\nbest mean dice: {best_metric:.4f} at epoch: {best_metric_epoch}"
                 )
+                writer.add_scalar("val_mean_dice", metric, epoch + 1)
+                plot_2d_or_3d_image(val_inputs, epoch + 1, writer, index=0, tag="image")
+                plot_2d_or_3d_image(val_labels, epoch + 1, writer, index=0, tag="label")
+                plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")

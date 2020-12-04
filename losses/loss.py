@@ -3,7 +3,7 @@ import torch.nn as nn
 import monai
 
 
-class DiceCELoss(nn.Module):
+class DiceCELoss_reg(nn.Module):
     """Dice and Xentropy loss"""
 
     def __init__(self):
@@ -26,3 +26,19 @@ class DiceCELoss(nn.Module):
         cross_entropy = self.cross_entropy(y_pred, torch.squeeze(y_true, dim=1).long())
         regg_loss = nn.MSELoss()(ratio_true.to(device), regressed_pred)
         return dice + cross_entropy + regg_loss
+
+class DiceCELoss(nn.Module):
+    """Dice and Xentropy loss"""
+
+    def __init__(self):
+        super().__init__()
+        self.dice = monai.losses.DiceLoss(to_onehot_y=True, softmax=True)
+        self.cross_entropy = nn.CrossEntropyLoss()
+
+    def forward(self, y_pred, y_true):
+        dice = self.dice(y_pred, y_true)
+        # CrossEntropyLoss target needs to have shape (B, D, H, W)
+        # Target from pipeline has shape (B, 1, D, H, W)
+        cross_entropy = self.cross_entropy(y_pred, torch.squeeze(y_true, dim=1).long())
+        return dice + cross_entropy
+
